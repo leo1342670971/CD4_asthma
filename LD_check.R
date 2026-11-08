@@ -1,4 +1,4 @@
-## ---- Local LD check script v8：基于 outcome 中 query SNP 坐标上下游 1000kb 选 SNP ----
+
 
 library(ieugwasr)
 library(data.table)
