@@ -5,20 +5,14 @@ setwd("C:/Users/Szq/Desktop/MR")
 
 library(data.table)
 
-## -----------------------------
-## 1. 读取基因
-## -----------------------------
-gene_dt <- fread("基因药物查询.csv", header = TRUE)
+gene_dt <- fread("111.csv", header = TRUE)
 stopifnot("gene" %in% names(gene_dt))
 
 genes <- unique(na.omit(trimws(as.character(gene_dt$gene))))
 genes <- genes[genes != ""]
 
-cat("输入基因数：", length(genes), "\n")
+cat("gene：", length(genes), "\n")
 
-## -----------------------------
-## 2. 依赖包
-## -----------------------------
 pkgs <- c("httr2", "jsonlite", "stringr")
 to_install <- pkgs[!vapply(pkgs, requireNamespace, logical(1), quietly = TRUE)]
 if (length(to_install)) install.packages(to_install)
@@ -52,9 +46,6 @@ split_ids <- function(x) {
   x
 }
 
-## -----------------------------
-## 3. OpenTargets GraphQL 基础函数
-## -----------------------------
 base_url <- "https://api.platform.opentargets.org/api/v4/graphql"
 
 ot_post <- function(query, variables = list()) {
@@ -87,9 +78,6 @@ ot_post <- function(query, variables = list()) {
   out$data
 }
 
-## -----------------------------
-## 4. gene symbol -> Ensembl ID
-## -----------------------------
 q_search_target <- '
 query($q: String!){
   search(
@@ -197,11 +185,6 @@ resolve_to_target <- function(gene) {
   )
 }
 
-## -----------------------------
-## 5. target -> drugs
-## 这里用于判断某个 gene 是否有对应 drug
-## 只保留 drugId、drugName、target 临床报告 ID 和 target-level clinical stage
-## -----------------------------
 q_target_drugs <- '
 query($ensemblId: String!){
   target(ensemblId: $ensemblId){
@@ -264,11 +247,6 @@ fetch_target_drugs_simple <- function(ensemblId) {
   unique(res)
 }
 
-## -----------------------------
-## 6. drug -> indication + MOA
-## indication 没有时后面填 NA
-## MOA 没有时后面填 unknown
-## -----------------------------
 q_drug_full <- '
 query($chemblId: String!){
   drug(chemblId: $chemblId){
@@ -418,9 +396,6 @@ fetch_drug_full_simple <- function(drugId) {
 }
 
 ## -----------------------------
-## 7. clinicalReports(ids) -> clinical stage
-## 按你给的 ClinicalRecordsQuery 查询
-## -----------------------------
 q_clinical_records <- '
 query($clinicalReportsIds: [String!]!) {
   clinicalReports(clinicalReportsIds: $clinicalReportsIds) {
@@ -468,10 +443,6 @@ fetch_clinical_reports_simple <- function(report_ids) {
   unique(res)
 }
 
-## -----------------------------
-## 8. clinical report 缓存
-## 避免同一个 clinicalReportId 反复查询
-## -----------------------------
 clinical_cache <- new.env(parent = emptyenv())
 
 get_clinical_reports_cached <- function(report_ids) {
@@ -546,10 +517,7 @@ get_stage_from_reports <- function(report_ids) {
   paste(stages, collapse = "; ")
 }
 
-## -----------------------------
-## 9. 批量运行
-## 不写任何大中间文件
-## -----------------------------
+
 result_list <- list()
 failed_list <- list()
 
@@ -578,7 +546,6 @@ for (i in seq_along(genes)) {
     }
   )
   
-  ## 库里没有这个基因：不输出
   if (is.na(mapped$ensemblId) || mapped$ensemblId == "") {
     failed_list[[length(failed_list) + 1]] <- list(
       gene = g,
@@ -590,7 +557,6 @@ for (i in seq_along(genes)) {
   
   Sys.sleep(0.1)
   
-  ## ---- 9.2 target -> drugs ----
   target_drugs <- tryCatch(
     fetch_target_drugs_simple(mapped$ensemblId),
     error = function(e) {
@@ -604,16 +570,14 @@ for (i in seq_along(genes)) {
     }
   )
   
-  ## 这个基因没有对应药物：不输出
+
   if (!nrow(target_drugs)) next
   
   drug_ids <- unique(target_drugs$drugId)
   drug_ids <- drug_ids[!is.na(drug_ids) & drug_ids != ""]
   
-  ## ---- 9.3 对每个 drugId 查 drug-level indication + MOA + clinical stage ----
   for (drug_id in drug_ids) {
     
-    ## drug 缓存
     if (exists(drug_id, envir = drug_cache, inherits = FALSE)) {
       
       drug_full <- get(drug_id, envir = drug_cache)
@@ -655,7 +619,6 @@ for (i in seq_along(genes)) {
     ind_dt <- copy(drug_full$indications)
     moa_dt <- copy(drug_full$moa)
     
-    ## 当前 gene 对应的 drug 名
     this_drug_name <- target_drugs[drugId == drug_id, unique(drug)]
     this_drug_name <- this_drug_name[!is.na(this_drug_name) & this_drug_name != ""]
     this_drug_name <- if (length(this_drug_name)) this_drug_name[1] else NA_character_
@@ -679,11 +642,9 @@ for (i in seq_along(genes)) {
         indication_report_ids = NA_character_
       )
     }
-    
-    ## 如果 drug name 缺失，用 target_drugs 的 drug name 补
+
     ind_dt[is.na(drug) | drug == "", drug := this_drug_name]
     
-    ## 如果 MOA 缺失，按要求填 unknown
     if (!nrow(moa_dt)) {
       moa_dt <- data.table(
         drugId = drug_id,
@@ -696,10 +657,9 @@ for (i in seq_along(genes)) {
     moa_dt[is.na(mechanisms_of_action) | mechanisms_of_action == "",
            mechanisms_of_action := "unknown"]
     
-    ## 每个 drugId 的 MOA 已经 collapse 成一行
+
     moa_one <- moa_dt[1]
-    
-    ## ---- 9.4 生成最终小表 ----
+
     for (j in seq_len(nrow(ind_dt))) {
       
       report_ids_j <- split_ids(ind_dt$indication_report_ids[j])
@@ -739,24 +699,18 @@ for (i in seq_along(genes)) {
   }
 }
 
-## -----------------------------
-## 10. 最终精简输出
-## -----------------------------
+
 if (length(result_list)) {
   
   final_dt <- rbindlist(result_list, fill = TRUE)
-  
-  ## 基因和药物必须存在；indication/MOA/clinical stage 可以为空或 unknown
+
   final_dt <- final_dt[
     !is.na(gene) & gene != "" &
       !is.na(drugId) & drugId != "" &
       !is.na(drug) & drug != ""
   ]
   
-  ## 按你的要求：
-  ## indication 没有则 NA
-  ## MOA 没有则 unknown
-  ## clinical stage 没有则 NA
+
   final_dt[clinical_indication == "", clinical_indication := NA_character_]
   final_dt[is.na(mechanisms_of_action) | mechanisms_of_action == "",
            mechanisms_of_action := "unknown"]
@@ -797,23 +751,8 @@ fwrite(
   "OpenTargets_gene_drug_indication_MOA_clinicalStage_simple.csv"
 )
 
-## -----------------------------
-## 11. 保存很小的失败日志
-## -----------------------------
-if (length(failed_list)) {
-  saveRDS(failed_list, "OpenTargets_failed_simple.rds")
-  
-  failed_dt <- rbindlist(failed_list, fill = TRUE)
-  fwrite(failed_dt, "OpenTargets_failed_simple.csv")
-}
 
-cat("\n完成。\n")
-cat("最终结果行数：", nrow(final_dt), "\n")
-cat("输出文件：OpenTargets_gene_drug_indication_MOA_clinicalStage_simple.csv\n")
 
-if (length(failed_list)) {
-  cat("失败日志：OpenTargets_failed_simple.rds\n")
-  cat("失败日志CSV：OpenTargets_failed_simple.csv\n")
 }
 
 print(head(final_dt, 30))
