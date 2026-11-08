@@ -113,8 +113,6 @@ resolve_to_target <- function(gene) {
   
   gene_raw <- trimws(as.character(gene))
   gene_no_version <- sub("\\..*$", "", gene_raw)
-  
-  ## 输入已经是 ENSG
   if (grepl("^ENSG\\d+$", gene_no_version, ignore.case = TRUE)) {
     
     ensg <- toupper(gene_no_version)
@@ -142,8 +140,7 @@ resolve_to_target <- function(gene) {
       match_type = "input_is_ensembl"
     ))
   }
-  
-  ## 输入是 gene symbol
+
   d <- tryCatch(
     ot_post(q_search_target, list(q = gene_raw)),
     error = function(e) NULL
@@ -462,7 +459,6 @@ get_clinical_reports_cached <- function(report_ids) {
   
   if (length(missing_ids)) {
     
-    ## 分块查询，避免一次传太多 ID
     chunks <- split(missing_ids, ceiling(seq_along(missing_ids) / 100))
     
     for (chunk in chunks) {
@@ -623,7 +619,6 @@ for (i in seq_along(genes)) {
     this_drug_name <- this_drug_name[!is.na(this_drug_name) & this_drug_name != ""]
     this_drug_name <- if (length(this_drug_name)) this_drug_name[1] else NA_character_
     
-    ## target-level clinical stage/report ids，用于 indication 没有 report 时兜底
     this_target_stage <- target_drugs[drugId == drug_id, unique(target_max_clinical_stage)]
     this_target_stage <- this_target_stage[!is.na(this_target_stage) & this_target_stage != ""]
     this_target_stage <- if (length(this_target_stage)) paste(this_target_stage, collapse = "; ") else NA_character_
@@ -666,7 +661,6 @@ for (i in seq_along(genes)) {
       
       clinical_stage_j <- get_stage_from_reports(report_ids_j)
       
-      ## clinicalReports 没查到时，依次用 indication max stage、target report stage、target max stage 兜底
       if (is.na(clinical_stage_j) || clinical_stage_j == "") {
         clinical_stage_j <- scalar_chr(ind_dt$indication_max_clinical_stage[j])
       }
