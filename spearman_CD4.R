@@ -1,9 +1,3 @@
-# ============================================================
-# Start from 01 background + 02 significant-gene files.
-# Required inputs:
-#   01_all_eGene_cell_type_gene_deduplicated.csv
-#   02_significant_eGene_cell_type_gene_deduplicated.csv
-# ============================================================
 
 # 1. Settings -------------------------------------------------
 work_dir <- if (.Platform$OS.type == "windows") {
@@ -432,35 +426,7 @@ provenance <- data.table(
   md5 = unname(tools::md5sum(c(background_file, significant_file)))
 )
 save_csv(provenance, "source_files_and_MD5.csv")
-summary_lines <- c(
-  paste("Background:", background_file),
-  paste("Significant records:", significant_file),
-  paste("Output folder:", out_dir),
-  paste("Background gene-state records:", nrow(all_dt)),
-  paste("Significant gene-state records:", nrow(sig_dt)),
-  paste("Unique background Ensembl IDs:", uniqueN(all_dt$gene_id)),
-  paste("Unique significant Ensembl IDs:", uniqueN(sig_dt$gene_id)),
-  paste("States / Fisher comparisons:", nrow(plot_df)),
-  paste("Significant genes appearing in multiple states:",
-        sum(gene_reuse$N_states_significant > 1L)),
-  paste("Nominal enrichment P < 0.05:", sum(enrich_df$nominal_P_lt_0_05)),
-  paste("BH-adjusted enrichment P < 0.05:", sum(enrich_df$BH_lt_0_05)),
-  paste("Gene-clustered sensitivity:", sensitivity_status),
-  "",
-  "Interpretation:",
-  "- The 01 file defines the analysis background; 02 defines the significant set.",
-  "- This script does not repeat MR estimation or redefine MR significance.",
-  "- Background records absent from 02 are classified as not listed as significant.",
-  "- Eligibility/completed MR analysis must be established when constructing 01.",
-  "- Gene ID and full state determine identity; symbols are annotations.",
-  "- Spearman rho is descriptive; its nominal P ignores cross-state dependence.",
-  "- Fisher tests compare each state with pooled gene-state records from other states.",
-  "- Wilson and Fisher intervals are pointwise and do not account for gene reuse.",
-  "- BH/BY correction alone does not repair dependence within individual Fisher tests.",
-  "- GEE is an additional analysis with gene-clustered robust standard errors.",
-  "- Sparse states, inter-gene LD, shared-donor errors and power differences remain limitations.",
-  "- Results using CD4+ T-cell eQTLs do not establish a CD4+ T-cell-specific mechanism."
-)
+
 writeLines(summary_lines, file.path(out_dir, "README_run_summary.txt"))
 capture.output(sessionInfo(), file = file.path(out_dir, "R_sessionInfo.txt"))
 print(audit_summary)
