@@ -12,9 +12,9 @@ outcome_file_map <- c(
   "finngen_R12_J10_ASTHMA_EXMORE.gz" = "finngen_R12_J10_ASTHMA_EXMORE.gz.csv"
 )
 
-ld_bfile <- "E:/data/SMR/LD/bfile/EUR"
-plink_bin <- "E:/data/SMR/LD/plink_win64/plink.exe"
-output_csv <- "E:/data/SMR/LD_check_results.csv"
+ld_bfile <- "E:/data/bfile/EUR"
+plink_bin <- "E:/data/plink_win64/plink.exe"
+output_csv <- "E:/data/LD_check_results.csv"
 
 #change
 window_size <- 1000000
