@@ -1,796 +1,226 @@
 library(data.table)
 library(plinkbinr)
-library(parallel)
 
+# Configuration
 WORK_DIR <- "~/lj74/CD4T"
-setwd(WORK_DIR)
-
 EXPOSURE_FILE <- "CD4all1.8.txt"
+EUR_BFILE <- "/data/h004/lj74/1000G.EUR/1000G_EUR"
+CLUMP_WORK_DIR <- "/data/h004/lj74/Rbao/plink_clump_sensitive3_simplified"
 
 P_THRESHOLD <- 0.05
 F_THRESHOLD <- 5
-
 CLUMP_KB <- 10000
 CLUMP_R2 <- 0.1
-CLUMP_P  <- 1
-
-
-EUR_BFILE <- "/data/h004/lj74/1000G.EUR/1000G_EUR"
-
-CLUMP_WORK_DIR <- "/data/h004/lj74/Rbao/plink_clump_sensitive3_parallel"
+CLUMP_P <- 1
 N_WORKERS <- 4L
 PLINK_THREADS_PER_JOB <- 1L
 PLINK_MEMORY_MB <- 4096L
-PARALLEL_BATCH_SIZE <- N_WORKERS * 2L
 STOP_ON_FIRST_FAILED_BATCH <- TRUE
-RESET_CLUMP_WORK <- TRUE
+RESET_CLUMP_WORK <- FALSE  # TRUE removes this script's checkpoint directory.
 
 EXPOSURE_FILTERED_FILE <- "CD4T_exposure_after_P_F_filter.csv"
 EXPOSURE_CLUMP_INDEX_FILE <- "CD4T_exposure_LD_clump_index.csv"
 EXPOSURE_CLUMPED_FILE <- "CD4T_exposure_after_LD_clumping.csv"
-CLUMP_PROGRESS_FILE <- file.path(CLUMP_WORK_DIR, "clump_progress.csv")
-CLUMP_DONE_FILE <- file.path(CLUMP_WORK_DIR, "completed_ids.txt")
-CLUMP_FAILED_FILE <- file.path(CLUMP_WORK_DIR, "failed_ids.csv")
 
-format_duration <- function(seconds) {
-  if (is.na(seconds) || !is.finite(seconds) || seconds < 0) {
-    return("NA")
-  }
-  
-  seconds <- round(seconds)
-  days <- seconds %/% 86400
-  hours <- (seconds %% 86400) %/% 3600
-  minutes <- (seconds %% 3600) %/% 60
-  secs <- seconds %% 60
-
-if (RESET_CLUMP_WORK && dir.exists(CLUMP_WORK_DIR)) {
-  message("RESET_CLUMP_WORK=TRUE：删除旧的clumping工作目录。")
-  unlink(CLUMP_WORK_DIR, recursive = TRUE, force = TRUE)
+# Validate inputs before changing checkpoints.
+setwd(path.expand(WORK_DIR))
+plink_path <- plinkbinr::get_plink_exe()
+panel_files <- paste0(EUR_BFILE, c(".bed", ".bim", ".fam"))
+required_files <- c(EXPOSURE_FILE, plink_path, panel_files)
+if (any(!file.exists(required_files))) {
+  stop("Missing files: ", paste(required_files[!file.exists(required_files)], collapse = ", "))
 }
+stopifnot(P_THRESHOLD > 0, P_THRESHOLD <= 1, F_THRESHOLD >= 0,
+          CLUMP_R2 >= 0, CLUMP_R2 <= 1, CLUMP_KB > 0,
+          CLUMP_P > 0, CLUMP_P <= 1, N_WORKERS >= 1,
+          PLINK_THREADS_PER_JOB >= 1, PLINK_MEMORY_MB >= 1)
+cores <- parallel::detectCores()
+if (is.na(cores)) cores <- 1L
+N_WORKERS <- as.integer(min(N_WORKERS, cores))
+if (.Platform$OS.type == "windows") N_WORKERS <- 1L
 
-dir.create(
-  CLUMP_WORK_DIR,
-  recursive = TRUE,
-  showWarnings = FALSE
-)
-
-b <- fread(EXPOSURE_FILE, header = TRUE)
-setDT(b)
-
-required_exp_cols <- c(
-  "id", "SNP", "chr", "pos",
-  "other allele", "effect allele",
-  "maf", "beta", "se", "pval",
-  "samplesize", "source"
-)
-
-missing_exp_cols <- setdiff(required_exp_cols, names(b))
-
-if (length(missing_exp_cols) > 0) {
-  stop(
-    "missing_exp_cols：",
-    paste(missing_exp_cols, collapse = ", ")
-  )
-}
-
-setnames(
-  b,
-  old = c("id", "other allele", "effect allele"),
-  new = c("gene", "OA_exp", "EA_exp")
-)
-
+# Read, clean and filter exposure data.
+b <- fread(EXPOSURE_FILE)
+required_cols <- c("id", "SNP", "chr", "pos", "other allele", "effect allele",
+                   "maf", "beta", "se", "pval", "samplesize", "source")
+missing_cols <- setdiff(required_cols, names(b))
+if (length(missing_cols)) stop("Missing columns: ", paste(missing_cols, collapse = ", "))
+setnames(b, c("id", "other allele", "effect allele"), c("gene", "OA_exp", "EA_exp"))
 b[, `:=`(
-  gene = trimws(as.character(gene)),
-  SNP = trimws(as.character(SNP)),
-  chr = as.character(chr),
-  pos = as.integer(pos),
-  OA_exp = toupper(trimws(as.character(OA_exp))),
-  EA_exp = toupper(trimws(as.character(EA_exp))),
-  maf = as.numeric(maf),
-  beta = as.numeric(beta),
-  se = as.numeric(se),
-  pval = as.numeric(pval),
-  samplesize = as.numeric(samplesize),
-  source = trimws(as.character(source))
+  gene = trimws(as.character(gene)), SNP = trimws(as.character(SNP)),
+  source = trimws(as.character(source)), chr = as.character(chr),
+  pos = as.integer(pos), OA_exp = toupper(trimws(as.character(OA_exp))),
+  EA_exp = toupper(trimws(as.character(EA_exp))), maf = as.numeric(maf),
+  beta = as.numeric(beta), se = as.numeric(se), pval = as.numeric(pval),
+  samplesize = as.numeric(samplesize)
 )]
-
 b <- b[
-  !is.na(gene) & gene != "" &
-    !is.na(source) & source != "" &
-    !is.na(SNP) & SNP != "" & SNP != "." &
-    !is.na(beta) &
-    !is.na(se) & se > 0 &
-    !is.na(pval) &
-    !is.na(chr) & !is.na(pos) &
-    !is.na(EA_exp) & EA_exp != "" &
-    !is.na(OA_exp) & OA_exp != ""
+  !is.na(gene) & gene != "" & !is.na(source) & source != "" &
+  !is.na(SNP) & SNP != "" & SNP != "." &
+  is.finite(beta) & is.finite(se) & se > 0 &
+  is.finite(pval) & pval >= 0 & pval <= 1 & pval < P_THRESHOLD &
+  !is.na(chr) & !is.na(pos) &
+  !is.na(EA_exp) & EA_exp != "" & !is.na(OA_exp) & OA_exp != ""
 ]
-
 b[, F_statistic := (beta / se)^2]
-
-b <- b[
-  pval < P_THRESHOLD &
-    is.finite(F_statistic) &
-    F_statistic >= F_THRESHOLD
-]
-
-# gene × cell/state定义为一个暴露
+b <- b[is.finite(F_statistic) & F_statistic >= F_THRESHOLD]
 b[, phenotype_id := paste(gene, source, sep = "__")]
-
-# 固定暴露ID，避免后续format_data随机生成ID
 b[, exposure_id := phenotype_id]
-
 setorder(b, phenotype_id, SNP, pval)
 b <- unique(b, by = c("phenotype_id", "SNP"))
+if (!nrow(b)) stop("No SNPs passed the P/F filters.")
 
-
-fwrite(b, EXPOSURE_FILTERED_FILE)
-
-plink_path <- plinkbinr::get_plink_exe()
-
-EUR_BED <- paste0(EUR_BFILE, ".bed")
-EUR_BIM <- paste0(EUR_BFILE, ".bim")
-EUR_FAM <- paste0(EUR_BFILE, ".fam")
-
-eur_snp <- fread(
-  EUR_BIM,
-  header = FALSE,
-  select = 2,
-  col.names = "rsid",
-  showProgress = TRUE
-)
-
-eur_snp[, rsid := as.character(rsid)]
-eur_snp <- unique(eur_snp[!is.na(rsid) & rsid != "" & rsid != "."])
-
-clump_input <- unique(
-  b[
-    ,
-    .(
-      rsid = as.character(SNP),
-      pval = as.numeric(pval),
-      id = as.character(phenotype_id)
-    )
-  ]
-)
-
-clump_input <- clump_input[
-  !is.na(rsid) &
-    rsid != "" &
-    rsid != "." &
-    !is.na(pval) &
-    is.finite(pval) &
-    pval >= 0 &
-    pval <= 1
-]
-
-
-n_before_panel <- nrow(clump_input)
-
-setkey(eur_snp, rsid)
-setkey(clump_input, rsid)
-
-clump_input <- clump_input[
-  eur_snp,
-  on = "rsid",
-  nomatch = 0L
-]
-
-clump_input <- unique(
-  clump_input[
-    ,
-    .(
-      rsid,
-      pval,
-      id
-    )
-  ]
-)
-
+# Match SNPs to the reference panel.
+panel <- fread(paste0(EUR_BFILE, ".bim"), header = FALSE, select = 2,
+               colClasses = "character", col.names = "rsid")
+panel <- unique(panel[!is.na(rsid) & rsid != "" & rsid != "."])
+clump_input <- b[, .(rsid = SNP, pval, id = phenotype_id)]
+clump_input <- clump_input[panel, on = "rsid", nomatch = 0L]
 setorder(clump_input, id, pval, rsid)
-
-id_summary <- clump_input[
-  ,
-  .(
-    n_SNP = uniqueN(rsid)
-  ),
-  by = id
-]
-
-setorder(id_summary, -n_SNP)
-
-rm(eur_snp)
+if (!nrow(clump_input)) stop("No SNPs matched the reference panel.")
+setindex(clump_input, id)
+all_ids <- sort(unique(clump_input$id))
+rm(panel)
 gc(verbose = FALSE)
 
-CLUMP_INPUT_DIR <- file.path(CLUMP_WORK_DIR, "inputs")
-CLUMP_OUTPUT_DIR <- file.path(CLUMP_WORK_DIR, "outputs")
-CLUMP_RESULT_DIR <- file.path(CLUMP_WORK_DIR, "results")
-CLUMP_DONE_DIR <- file.path(CLUMP_WORK_DIR, "done")
-CLUMP_FAILURE_DIR <- file.path(CLUMP_WORK_DIR, "failed")
-CLUMP_JOB_MAP_FILE <- file.path(CLUMP_WORK_DIR, "job_map.csv")
-
-for (d in c(
-  CLUMP_INPUT_DIR,
-  CLUMP_OUTPUT_DIR,
-  CLUMP_RESULT_DIR,
-  CLUMP_DONE_DIR,
-  CLUMP_FAILURE_DIR
-)) {
-  dir.create(d, recursive = TRUE, showWarnings = FALSE)
-  
-
+# One atomic RDS result per exposure replaces separate result/done files.
+# Resume only when the input, parameters, panel metadata and ID mapping match.
+manifest <- list(
+  version = 1L,
+  exposure_md5 = unname(tools::md5sum(EXPOSURE_FILE)),
+  plink_md5 = unname(tools::md5sum(plink_path)),
+  panel_paths = normalizePath(panel_files, winslash = "/"),
+  panel_metadata = file.info(panel_files)[, c("size", "mtime")],
+  parameters = c(P_THRESHOLD, F_THRESHOLD, CLUMP_KB, CLUMP_R2, CLUMP_P),
+  ids = all_ids
+)
+if (RESET_CLUMP_WORK && dir.exists(CLUMP_WORK_DIR)) {
+  # Refuse broad or unexpected deletion targets.
+  target <- normalizePath(CLUMP_WORK_DIR, winslash = "/", mustWork = TRUE)
+  if (basename(target) != "plink_clump_sensitive3_simplified") {
+    stop("Reset refused: use a new checkpoint directory instead.")
   }
+  unlink(target, recursive = TRUE)
+  if (dir.exists(target)) stop("Could not reset checkpoint directory.")
 }
-
-available_cores <- parallel::detectCores(logical = TRUE)
-
-if (is.na(available_cores) || available_cores < 1L) {
-  available_cores <- 1L
-}
-
-N_WORKERS <- max(
-  1L,
-  min(
-    as.integer(N_WORKERS),
-    as.integer(available_cores)
-  )
-)
-
-PARALLEL_BATCH_SIZE <- max(
-  N_WORKERS,
-  as.integer(PARALLEL_BATCH_SIZE)
-)
-
-all_ids <- sort(unique(clump_input$id))
-
-job_map <- data.table(
-  global_index = seq_along(all_ids),
-  file_tag = sprintf("job_%06d", seq_along(all_ids)),
-  id = all_ids
-)
-
-fwrite(job_map, CLUMP_JOB_MAP_FILE)
-
-done_files <- list.files(
-  CLUMP_DONE_DIR,
-  pattern = "^job_[0-9]+\\.done$",
-  full.names = TRUE
-)
-
-if (length(done_files) > 0L) {
-  expected_result_files <- file.path(
-    CLUMP_RESULT_DIR,
-    sub(
-      "\\.done$",
-      ".result.csv",
-      basename(done_files)
-    )
-  )
-  
-  done_files <- done_files[file.exists(expected_result_files)]
-}
-
-completed_ids <- character(0)
-
-if (!RESET_CLUMP_WORK && length(done_files) > 0L) {
-  completed_ids <- unique(
-    trimws(
-      unlist(
-        lapply(
-          done_files,
-          readLines,
-          warn = FALSE
-        ),
-        use.names = FALSE
-      )
-    )
-  )
-  
-  completed_ids <- completed_ids[
-    !is.na(completed_ids) & completed_ids != ""
-  ]
-}
-
-todo_ids <- setdiff(all_ids, completed_ids)
-
-
-
-run_one_clump <- function(current_id) {
-  
-  task_started <- Sys.time()
-  
-  map_row <- job_map[id == current_id]
-  
-  if (nrow(map_row) != 1L) {
-    return(list(
-      ok = FALSE,
-      id = current_id,
-      error = "无法在job_map中唯一定位当前暴露",
-      n_input = NA_integer_,
-      n_kept = NA_integer_,
-      elapsed_seconds = 0
-    ))
+dir.create(CLUMP_WORK_DIR, recursive = TRUE, showWarnings = FALSE)
+manifest_file <- file.path(CLUMP_WORK_DIR, "manifest.rds")
+if (file.exists(manifest_file)) {
+  if (!identical(readRDS(manifest_file), manifest)) {
+    stop("Checkpoint inputs or settings changed. Use a new directory or reset checkpoints.")
   }
-  
-  file_tag <- map_row$file_tag[[1]]
-  
-  current_dat <- clump_input[
-    id == current_id,
-    .(
-      rsid,
-      pval
-    )
-  ]
-  
-  current_dat <- unique(current_dat, by = "rsid")
-  setorder(current_dat, pval, rsid)
-  
-  assoc_file <- file.path(
-    CLUMP_INPUT_DIR,
-    paste0(file_tag, ".assoc")
-  )
-  
-  extract_file <- file.path(
-    CLUMP_INPUT_DIR,
-    paste0(file_tag, ".extract")
-  )
-  
-  out_prefix <- file.path(
-    CLUMP_OUTPUT_DIR,
-    file_tag
-  )
-  
-  plink_console_log <- paste0(out_prefix, ".console.log")
-  plink_native_log <- paste0(out_prefix, ".log")
-  clumped_file <- paste0(out_prefix, ".clumped")
-  
-  result_file <- file.path(
-    CLUMP_RESULT_DIR,
-    paste0(file_tag, ".result.csv")
-  )
-  
-  done_file <- file.path(
-    CLUMP_DONE_DIR,
-    paste0(file_tag, ".done")
-  )
-  
-  failure_file <- file.path(
-    CLUMP_FAILURE_DIR,
-    paste0(file_tag, ".failure.csv")
-  )
-  
+} else {
+  if (length(list.files(CLUMP_WORK_DIR, all.files = TRUE, no.. = TRUE))) {
+    stop("Checkpoint directory is not empty and has no manifest. Use a new directory.")
+  }
+  saveRDS(manifest, manifest_file)
+}
+job_map <- data.table(id = all_ids, tag = sprintf("job_%06d", seq_along(all_ids)))
+job_map[, result_file := file.path(CLUMP_WORK_DIR, paste0(tag, ".rds"))]
+fwrite(job_map, file.path(CLUMP_WORK_DIR, "job_map.csv"))
+fwrite(b, EXPOSURE_FILTERED_FILE)
+
+read_result <- function(i) {
+  path <- job_map$result_file[i]
+  if (!file.exists(path)) return(NULL)
+  x <- readRDS(path)
+  if (!is.data.table(x) || !identical(names(x), c("rsid", "pval", "id")) ||
+      !nrow(x) || anyNA(x) || !all(x$id == job_map$id[i]) ||
+      anyDuplicated(x$rsid)) {
+    stop("Invalid checkpoint: ", path)
+  }
+  x
+}
+completed <- vapply(seq_len(nrow(job_map)), function(i) !is.null(read_result(i)), logical(1))
+todo <- which(!completed)
+message(sprintf("Exposures: %d; completed: %d; pending: %d; workers: %d",
+                nrow(job_map), sum(completed), length(todo), N_WORKERS))
+
+# Run PLINK. Successful jobs keep only their RDS result; failed jobs keep logs.
+run_one_clump <- function(i) {
   tryCatch({
-    
-    fwrite(
-      current_dat[
-        ,
-        .(
-          SNP = rsid,
-          P = pval
-        )
-      ],
-      assoc_file,
-      sep = "\t",
-      quote = FALSE,
-      na = "NA"
+    current_id <- job_map$id[i]
+    dat <- clump_input[id == current_id, .(rsid, pval)]
+    prefix <- file.path(CLUMP_WORK_DIR, job_map$tag[i])
+    assoc <- paste0(prefix, ".assoc")
+    extract <- paste0(prefix, ".extract")
+    clumped <- paste0(prefix, ".clumped")
+    console <- paste0(prefix, ".console.log")
+    # Prevent a failed retry from reading an old PLINK output.
+    unlink(clumped)
+    if (file.exists(clumped)) stop("Could not remove stale PLINK output.")
+    fwrite(dat[, .(SNP = rsid, P = pval)], assoc, sep = "\t", quote = FALSE)
+    fwrite(dat[, .(rsid)], extract, col.names = FALSE, quote = FALSE)
+    args <- c(
+      "--bfile", shQuote(EUR_BFILE), "--extract", shQuote(extract),
+      "--clump", shQuote(assoc), "--clump-snp-field", "SNP", "--clump-field", "P",
+      "--clump-p1", CLUMP_P, "--clump-p2", CLUMP_P,
+      "--clump-r2", CLUMP_R2, "--clump-kb", CLUMP_KB,
+      "--threads", PLINK_THREADS_PER_JOB, "--memory", PLINK_MEMORY_MB,
+      "--out", shQuote(prefix)
     )
-    
-    fwrite(
-      current_dat[
-        ,
-        .(
-          rsid
-        )
-      ],
-      extract_file,
-      col.names = FALSE,
-      sep = "\t",
-      quote = FALSE
-    )
-    
-    if (
-      !file.exists(assoc_file) ||
-      is.na(file.info(assoc_file)$size) ||
-      file.info(assoc_file)$size <= 0
-    ) {
-      stop("无法创建PLINK clump输入文件：", assoc_file)
+    status <- system2(plink_path, args, stdout = console, stderr = console,
+                      env = paste0(c("OMP_NUM_THREADS=", "OPENBLAS_NUM_THREADS=",
+                                     "MKL_NUM_THREADS="), PLINK_THREADS_PER_JOB))
+    if (status != 0L || !file.exists(clumped)) {
+      stop("PLINK failed (status ", status, "). See ", console)
     }
-    
-    if (
-      !file.exists(extract_file) ||
-      is.na(file.info(extract_file)$size) ||
-      file.info(extract_file)$size <= 0
-    ) {
-      stop("无法创建PLINK extract输入文件：", extract_file)
+    selected <- fread(clumped, fill = TRUE)
+    if (!"SNP" %in% names(selected)) stop("Missing SNP column in PLINK output.")
+    kept <- unique(as.character(selected$SNP))
+    kept <- kept[!is.na(kept) & kept != ""]
+    if (!length(kept) || !all(kept %chin% dat$rsid)) {
+      stop("Empty or unexpected index SNPs in PLINK output.")
     }
-    
-    plink_args <- c(
-      "--bfile", EUR_BFILE,
-      "--extract", extract_file,
-      "--clump", assoc_file,
-      "--clump-snp-field", "SNP",
-      "--clump-field", "P",
-      "--clump-p1", format(CLUMP_P, scientific = FALSE),
-      "--clump-p2", format(CLUMP_P, scientific = FALSE),
-      "--clump-r2", format(CLUMP_R2, scientific = FALSE),
-      "--clump-kb", as.character(CLUMP_KB),
-      "--threads", as.character(PLINK_THREADS_PER_JOB),
-      "--memory", as.character(PLINK_MEMORY_MB),
-      "--out", out_prefix
-    )
-    
-    status <- system2(
-      command = plink_path,
-      args = plink_args,
-      stdout = plink_console_log,
-      stderr = plink_console_log,
-      wait = TRUE,
-      env = c(
-        paste0("OMP_NUM_THREADS=", PLINK_THREADS_PER_JOB),
-        paste0("OPENBLAS_NUM_THREADS=", PLINK_THREADS_PER_JOB),
-        paste0("MKL_NUM_THREADS=", PLINK_THREADS_PER_JOB)
-      )
-    )
-    
-    if (
-      !identical(as.integer(status), 0L) ||
-      !file.exists(clumped_file)
-    ) {
-      stop(
-        "PLINK退出状态=", status,
-        "；未生成预期的.clumped文件：", clumped_file
-      )
-    }
-    
-    clumped_dat <- fread(
-      clumped_file,
-      header = TRUE,
-      fill = TRUE,
-      data.table = TRUE
-    )
-    
-    if (!"SNP" %in% names(clumped_dat)) {
-      stop("PLINK .clumped结果中缺少SNP列：", clumped_file)
-    }
-    
-    kept_rsids <- unique(
-      as.character(
-        clumped_dat[
-          !is.na(SNP) & SNP != "",
-          SNP
-        ]
-      )
-    )
-    
-    if (length(kept_rsids) == 0L) {
-      stop("PLINK运行成功，但没有读取到任何index SNP")
-    }
-    
-    result_part <- current_dat[
-      rsid %chin% kept_rsids,
-      .(
-        rsid,
-        pval,
-        id = current_id
-      )
-    ]
-    
-    setorder(result_part, pval, rsid)
-    
-    # 先写结果，再写.done标记；保证断点不会把未落盘结果视为已完成。
-    fwrite(result_part, result_file)
-    writeLines(current_id, done_file)
-    
-    elapsed_seconds <- as.numeric(
-      difftime(
-        Sys.time(),
-        task_started,
-        units = "secs"
-      )
-    )
-    
-    success_files <- c(
-      assoc_file,
-      extract_file,
-      clumped_file,
-      plink_console_log,
-      plink_native_log,
-      paste0(out_prefix, ".nosex")
-    )
-    
-    unlink(
-      success_files[file.exists(success_files)],
-      force = TRUE
-    )
-    
-    list(
-      ok = TRUE,
-      id = current_id,
-      error = NA_character_,
-      n_input = nrow(current_dat),
-      n_kept = nrow(result_part),
-      elapsed_seconds = elapsed_seconds,
-      result_file = result_file
-    )
-    
-  }, error = function(e) {
-    
-    elapsed_seconds <- as.numeric(
-      difftime(
-        Sys.time(),
-        task_started,
-        units = "secs"
-      )
-    )
-    
-    failure_row <- data.table(
-      time = format(Sys.time(), "%Y-%m-%d %H:%M:%S"),
-      id = current_id,
-      n_SNP = nrow(current_dat),
-      error = conditionMessage(e),
-      assoc_file = assoc_file,
-      extract_file = extract_file,
-      plink_console_log = plink_console_log,
-      plink_native_log = plink_native_log,
-      expected_clumped_file = clumped_file
-    )
-    
-    fwrite(failure_row, failure_file)
-    
-    list(
-      ok = FALSE,
-      id = current_id,
-      error = conditionMessage(e),
-      n_input = nrow(current_dat),
-      n_kept = NA_integer_,
-      elapsed_seconds = elapsed_seconds,
-      failure_file = failure_file
-    )
-  })
+    result <- dat[rsid %chin% kept, .(rsid, pval, id = current_id)]
+    path <- job_map$result_file[i]
+    saveRDS(result, paste0(path, ".tmp"))
+    if (!file.rename(paste0(path, ".tmp"), path)) stop("Could not commit checkpoint.")
+    unlink(c(assoc, extract, clumped, console, paste0(prefix, c(".log", ".nosex"))))
+    list(ok = TRUE, error = NA_character_)
+  }, error = function(e) list(ok = FALSE, error = conditionMessage(e)))
 }
 
-run_start <- Sys.time()
-completed_this_run <- 0L
-failed_this_run <- list()
-
-if (length(todo_ids) > 0L) {
-  
-  batch_starts <- seq(
-    from = 1L,
-    to = length(todo_ids),
-    by = PARALLEL_BATCH_SIZE
-  )
-  
-  for (batch_number in seq_along(batch_starts)) {
-    
-    batch_start_index <- batch_starts[batch_number]
-    batch_end_index <- min(
-      batch_start_index + PARALLEL_BATCH_SIZE - 1L,
-      length(todo_ids)
-    )
-    
-    batch_ids <- todo_ids[
-      batch_start_index:batch_end_index
-    ]
-    
-    cat(
-      sprintf(
-        "\n========== 批次 %d/%d：提交%d个暴露，使用%d个并行worker ==========\n",
-        batch_number,
-        length(batch_starts),
-        length(batch_ids),
-        min(N_WORKERS, length(batch_ids))
-      )
-    )
-    
-    batch_started <- Sys.time()
-    
-    batch_results <- parallel::mclapply(
-      X = batch_ids,
-      FUN = run_one_clump,
-      mc.cores = min(N_WORKERS, length(batch_ids)),
-      mc.preschedule = FALSE,
-      mc.set.seed = FALSE
-    )
-    
-    # 防止mclapply中的worker异常直接返回try-error。
-    batch_results <- lapply(
-      seq_along(batch_results),
-      function(j) {
-        result_j <- batch_results[[j]]
-        
-        if (inherits(result_j, "try-error")) {
-          return(list(
-            ok = FALSE,
-            id = batch_ids[j],
-            error = as.character(result_j),
-            n_input = NA_integer_,
-            n_kept = NA_integer_,
-            elapsed_seconds = NA_real_
-          ))
-        }
-        
-        result_j
-      }
-    )
-    
-    ok_vec <- vapply(
-      batch_results,
-      function(x) isTRUE(x$ok),
-      logical(1)
-    )
-    
-    n_ok <- sum(ok_vec)
-    n_failed <- sum(!ok_vec)
-    
-    completed_this_run <- completed_this_run + n_ok
-    
-    if (n_failed > 0L) {
-      failed_this_run <- c(
-        failed_this_run,
-        batch_results[!ok_vec]
-      )
+# Small batches provide progress updates and stop promptly on failures.
+failed <- data.table(id = character(), error = character())
+failure_file <- file.path(CLUMP_WORK_DIR, "failed_ids.csv")
+fwrite(failed, failure_file)
+batch_size <- N_WORKERS * 2L
+batches <- split(todo, ceiling(seq_along(todo) / batch_size))
+for (batch in batches) {
+  results <- parallel::mclapply(batch, run_one_clump,
+                               mc.cores = min(N_WORKERS, length(batch)),
+                               mc.preschedule = FALSE, mc.set.seed = FALSE)
+  for (j in seq_along(batch)) {
+    x <- results[[j]]
+    if (is.null(x) || inherits(x, "try-error")) {
+      x <- list(ok = FALSE, error = if (is.null(x)) "Worker exited without a result." else as.character(x))
     }
-    
-    batch_elapsed <- as.numeric(
-      difftime(
-        Sys.time(),
-        batch_started,
-        units = "secs"
-      )
-    )
-    
-    total_elapsed <- as.numeric(
-      difftime(
-        Sys.time(),
-        run_start,
-        units = "secs"
-      )
-    )
-    
-    attempted_this_run <- min(
-      batch_end_index,
-      length(todo_ids)
-    )
-    
-    avg_seconds_per_attempt <- total_elapsed / attempted_this_run
-    remaining_attempts <- length(todo_ids) - attempted_this_run
-    estimated_remaining <- avg_seconds_per_attempt * remaining_attempts
-    
-    cat(
-      sprintf(
-        paste0(
-          "批次完成：成功=%d，失败=%d，批次耗时=%s\n",
-          "本次已尝试=%d/%d；累计成功=%d；累计失败=%d\n",
-          "总运行时间=%s；预计剩余=%s\n"
-        ),
-        n_ok,
-        n_failed,
-        format_duration(batch_elapsed),
-        attempted_this_run,
-        length(todo_ids),
-        completed_this_run,
-        length(failed_this_run),
-        format_duration(total_elapsed),
-        format_duration(estimated_remaining)
-      )
-    )
-    
-    if (n_failed > 0L) {
-      cat("本批次失败的暴露：\n")
-      
-      for (failed_item in batch_results[!ok_vec]) {
-        cat(
-          "  - ",
-          failed_item$id,
-          "：",
-          failed_item$error,
-          "\n",
-          sep = ""
-        )
-      }
-      
-      if (STOP_ON_FIRST_FAILED_BATCH) {
-        stop(
-          "并行clumping批次出现失败任务，已停止后续批次。",
-          "失败详情保存在：",
-          CLUMP_FAILURE_DIR
-        )
-      }
+    i <- batch[j]
+    completed[i] <- isTRUE(x$ok)
+    if (!completed[i]) {
+      failed <- rbind(failed, data.table(id = job_map$id[i], error = x$error))
     }
-    
-    gc(verbose = FALSE)
+  }
+  fwrite(failed, failure_file)
+  message(sprintf("Completed: %d/%d; failed this run: %d",
+                  sum(completed), nrow(job_map), nrow(failed)))
+  if (nrow(failed) && STOP_ON_FIRST_FAILED_BATCH) {
+    stop("Clumping failed. See ", failure_file, ". Rerun with RESET_CLUMP_WORK = FALSE.")
   }
 }
 
-result_files <- list.files(
-  CLUMP_RESULT_DIR,
-  pattern = "^job_[0-9]+\\.result\\.csv$",
-  full.names = TRUE
-)
-
-
-clump_result_list <- lapply(
-  result_files,
-  function(f) {
-    tryCatch(
-      fread(f),
-      error = function(e) {
-        stop(
-          "无法读取clumping结果文件：",
-          f,
-          "\n错误：",
-          conditionMessage(e)
-        )
-      }
-    )
-  }
-)
-
-clump_result <- rbindlist(
-  clump_result_list,
-  use.names = TRUE,
-  fill = TRUE
-)
-
-required_clump_cols <- c("rsid", "pval", "id")
-missing_clump_cols <- setdiff(required_clump_cols, names(clump_result))
-
-clump_result[, `:=`(
-  rsid = as.character(rsid),
-  pval = as.numeric(pval),
-  id = as.character(id)
-)]
-
-clump_result <- unique(
-  clump_result[
-    !is.na(rsid) &
-      rsid != "" &
-      !is.na(id) &
-      id != ""
-  ],
-  by = c("id", "rsid")
-)
-
+# Publish final outputs only when every current exposure has a valid result.
+if (!all(completed)) stop("Some jobs failed. Final outputs were not updated. See ", failure_file)
+clump_result <- rbindlist(lapply(seq_len(nrow(job_map)), read_result))
+if (!setequal(clump_result$id, all_ids)) stop("Incomplete clumping results.")
 setorder(clump_result, id, pval, rsid)
-
-fwrite(clump_result, CLUMP_PROGRESS_FILE)
-
-completed_ids_final <- sort(unique(clump_result$id))
-writeLines(completed_ids_final, CLUMP_DONE_FILE)
-
-
-fwrite(
-  clump_result,
-  EXPOSURE_CLUMP_INDEX_FILE
-)
-
-clump_keep <- unique(
-  clump_result[
-    ,
-    .(
-      SNP = as.character(rsid),
-      phenotype_id = as.character(id)
-    )
-  ]
-)
-
-b_clumped <- merge(
-  b,
-  clump_keep,
-  by = c("SNP", "phenotype_id"),
-  all = FALSE
-)
-
-setorder(
-  b_clumped,
-  phenotype_id,
-  pval,
-  SNP
-)
-
-fwrite(
-  b_clumped,
-  EXPOSURE_CLUMPED_FILE
-)
+clump_keep <- clump_result[, .(SNP = rsid, phenotype_id = id)]
+b_clumped <- merge(b, clump_keep, by = c("SNP", "phenotype_id"), all = FALSE)
+if (nrow(b_clumped) != nrow(clump_result)) stop("Exposure merge did not preserve all index SNPs.")
+setorder(b_clumped, phenotype_id, pval, SNP)
+fwrite(clump_result, EXPOSURE_CLUMP_INDEX_FILE)
+fwrite(b_clumped, EXPOSURE_CLUMPED_FILE)
+message(sprintf("Finished: %d index SNP rows across %d exposures.",
+                nrow(b_clumped), uniqueN(b_clumped$phenotype_id)))
 
