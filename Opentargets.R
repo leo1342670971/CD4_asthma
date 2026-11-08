@@ -1,24 +1,3 @@
-## ============================================================
-## OpenTargets：基因 -> 药物 -> indication + MOA + clinical stage
-## 精简版：不生成大中间文件
-##
-## 输入：
-##   C:/Users/Szq/Desktop/MR/基因药物查询.csv
-##   必须包含 gene 列
-##
-## 输出：
-##   OpenTargets_gene_drug_indication_MOA_clinicalStage_simple.csv
-##
-## 最终列：
-##   gene
-##   drugId
-##   drug
-##   clinical_indication
-##   mechanisms_of_action
-##   moa_target_name
-##   moa_target_symbol
-##   clinical_stage
-## ============================================================
 
 rm(list = ls())
 
