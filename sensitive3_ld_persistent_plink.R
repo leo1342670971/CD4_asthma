@@ -132,12 +132,6 @@ EUR_BED <- paste0(EUR_BFILE, ".bed")
 EUR_BIM <- paste0(EUR_BFILE, ".bim")
 EUR_FAM <- paste0(EUR_BFILE, ".fam")
 
-cat("PLINK路径：", plink_path, "\n")
-cat("BED文件：", EUR_BED, "\n")
-cat("BIM文件：", EUR_BIM, "\n")
-cat("FAM文件：", EUR_FAM, "\n")
-
-
 eur_snp <- fread(
   EUR_BIM,
   header = FALSE,
@@ -495,7 +489,6 @@ run_one_clump <- function(current_id) {
       )
     )
     
-    # 成功后清理大部分中间文件；result和done文件保留用于断点汇总。
     success_files <- c(
       assoc_file,
       extract_file,
@@ -555,11 +548,6 @@ run_one_clump <- function(current_id) {
     )
   })
 }
-
-
-# ============================================================
-# 8. 分批并行运行、输出进度和ETA
-# ============================================================
 
 run_start <- Sys.time()
 completed_this_run <- 0L
@@ -766,7 +754,6 @@ clump_result <- unique(
 
 setorder(clump_result, id, pval, rsid)
 
-# 更新兼容旧版的汇总进度文件和completed_ids文件。
 fwrite(clump_result, CLUMP_PROGRESS_FILE)
 
 completed_ids_final <- sort(unique(clump_result$id))
