@@ -1,17 +1,12 @@
-
-
 library(ieugwasr)
 library(data.table)
 library(dplyr)
-# -----------------------------
-# 参数设置
-# -----------------------------
 input_file <- ""
 
-# outcome 文件所在路径
+# outcome file
 outcome_dir <- ""
 
-# outcome 与文件名对应关系
+# outcome 
 outcome_file_map <- c(
   "Asthma_GBMI" = "Asthma_GBMI.txt",
   "finngen_R12_J10_ASTHMA_EXMORE.gz" = "finngen_R12_J10_ASTHMA_EXMORE.gz.csv"
@@ -21,25 +16,15 @@ ld_bfile <- "E:/data/SMR/LD/bfile/EUR"
 plink_bin <- "E:/data/SMR/LD/plink_win64/plink.exe"
 output_csv <- "E:/data/SMR/LD_check_results.csv"
 
-# 上下游窗口大小：1000kb
+#change
 window_size <- 1000000
 
-# -----------------------------
-# 读取 input
-# -----------------------------
 input <- fread(input_file)
 
-# -----------------------------
-# 检查 input 列名
-# 现在不再依赖 chr / pos_start / pos_end，但保留检查可改为只检查必要列
-# -----------------------------
 if(!all(c("exposure", "outcome", "SNP") %in% colnames(input))){
   stop("Input file must contain columns: exposure, outcome, SNP")
 }
 
-# -----------------------------
-# 读取 EUR.bim，检查 SNP 是否在本地 LD 参考面板中
-# -----------------------------
 bim_file <- paste0(ld_bfile, ".bim")
 
 if(!file.exists(bim_file)){
@@ -49,23 +34,13 @@ if(!file.exists(bim_file)){
 eur_bim <- fread(bim_file, header = FALSE)
 eur_snps <- unique(as.character(eur_bim$V2))
 
-# -----------------------------
-# 统一 chr 格式
-# -----------------------------
 clean_chr <- function(x){
   gsub("^chr", "", as.character(x), ignore.case = TRUE)
 }
 
-# -----------------------------
-# 不建议只按 SNP 去重
-# 因为同一个 SNP 可能对应不同 exposure / outcome
-# -----------------------------
 input[, SNP := as.character(SNP)]
 input <- unique(input, by = c("exposure", "outcome", "SNP"))
 
-# -----------------------------
-# outcome 文件缓存，避免重复 fread
-# -----------------------------
 outcome_cache <- list()
 
 load_outcome_data <- function(outcome_name){
@@ -110,9 +85,6 @@ load_outcome_data <- function(outcome_name){
   return(dat)
 }
 
-# -----------------------------
-# 结果列表
-# -----------------------------
 results_list <- list()
 
 for(i in 1:nrow(input)){
@@ -129,9 +101,6 @@ for(i in 1:nrow(input)){
     "| outcome:", outcome_id, "\n"
   )
   
-  # -----------------------------
-  # 0. 根据 outcome 读取对应 outcome 文件
-  # -----------------------------
   outcome_dat <- tryCatch({
     load_outcome_data(outcome_id)
   }, error = function(e){
@@ -160,10 +129,6 @@ for(i in 1:nrow(input)){
   if(is.null(outcome_dat)){
     next
   }
-  
-  # -----------------------------
-  # 1. 先检查 query SNP 是否在 EUR 参考面板中
-  # -----------------------------
   query_in_eur <- rsid %in% eur_snps
   
   if(!query_in_eur){
@@ -187,10 +152,6 @@ for(i in 1:nrow(input)){
     next
   }
   
-  # -----------------------------
-  # 2. 在 outcome 中匹配 query SNP
-  #    用 outcome 自己的 chr / pos 定义上下游 1000kb 区域
-  # -----------------------------
   query_outcome_pos <- outcome_dat[SNP == rsid]
   
   if(nrow(query_outcome_pos) == 0){
@@ -213,8 +174,6 @@ for(i in 1:nrow(input)){
     )
     next
   }
-  
-  # 如果 outcome 中 query SNP 重复，保留 p 值最小的一条
   query_outcome_pos <- query_outcome_pos[order(pval)][1]
   
   query_chr <- query_outcome_pos$chr_clean
@@ -222,10 +181,7 @@ for(i in 1:nrow(input)){
   
   region_start <- query_pos - window_size
   region_end <- query_pos + window_size
-  
-  # -----------------------------
-  # 3. 基于 outcome 坐标提取 query SNP 上下游 1000kb SNP
-  # -----------------------------
+
   region_snps_all <- outcome_dat[
     chr_clean == query_chr &
       pos >= region_start &
@@ -254,16 +210,9 @@ for(i in 1:nrow(input)){
     )
     next
   }
-  
-  # -----------------------------
-  # 4. 按 outcome pval 筛选 SNP
-  #    先按 pval 升序，再保留 pval < 1e-3
-  #    如果 >=500，取前499个
-  # -----------------------------
+
   region_snps <- region_snps_all[order(pval)]
   region_snps <- region_snps[pval < 1e-3]
-  
-  # 去掉 outcome 中重复 SNP，保留 p 值最小的那条
   region_snps <- region_snps[!duplicated(SNP)]
   
   n_region_after_pfilter <- nrow(region_snps)
@@ -293,17 +242,11 @@ for(i in 1:nrow(input)){
     region_snps <- region_snps[1:499]
   }
   
-  # -----------------------------
-  # 5. 区域 SNP + query SNP
-  # -----------------------------
   snp_list <- unique(c(as.character(region_snps$SNP), rsid))
   
   n_snps_input_ld <- length(snp_list)
   n_snps_in_eur <- sum(snp_list %in% eur_snps)
-  
-  # -----------------------------
-  # 6. 本地 LD matrix 计算
-  # -----------------------------
+
   ld_mat <- NULL
   attempts <- 0
   
@@ -330,9 +273,6 @@ for(i in 1:nrow(input)){
     Sys.sleep(1)
   }
   
-  # -----------------------------
-  # 7. 如果 LD 矩阵为空
-  # -----------------------------
   if(is.null(ld_mat) || is.null(nrow(ld_mat))){
     results_list[[i]] <- data.frame(
       SNP_query = rsid,
@@ -353,11 +293,7 @@ for(i in 1:nrow(input)){
     )
     next
   }
-  
-  # -----------------------------
-  # 8. 找 query SNP 在 LD 矩阵中的列
-  #    with_alleles = TRUE 时列名可能是 rs71356699_T_C
-  # -----------------------------
+
   query_pattern <- paste0("^", rsid, "($|_)")
   col.index <- grep(query_pattern, colnames(ld_mat))
   
@@ -384,17 +320,11 @@ for(i in 1:nrow(input)){
   
   col.index <- col.index[1]
   query_bfile_name <- colnames(ld_mat)[col.index]
-  
-  # -----------------------------
-  # 9. 取 query SNP 这一列，平方为 r2
-  # -----------------------------
+
   b <- (ld_mat[, col.index])^2
   names(b) <- rownames(ld_mat)
   b <- b[!is.na(b)]
-  
-  # -----------------------------
-  # 10. 如果 LD 矩阵只有 query SNP 一个 SNP
-  # -----------------------------
+
   if(length(b) <= 1){
     results_list[[i]] <- data.frame(
       SNP_query = rsid,
@@ -415,10 +345,7 @@ for(i in 1:nrow(input)){
     )
     next
   }
-  
-  # -----------------------------
-  # 11. 排除 query SNP 自身后，找最大 r2
-  # -----------------------------
+
   b_no_self <- b[names(b) != query_bfile_name]
   
   if(length(b_no_self) == 0){
@@ -466,10 +393,6 @@ for(i in 1:nrow(input)){
     note = "LD calculated successfully using outcome-based 1000kb region"
   )
 }
-
-# -----------------------------
-# 保存结果
-# -----------------------------
 final_results <- bind_rows(results_list)
 
 fwrite(final_results, output_csv)
