@@ -3,10 +3,6 @@ library(stringr)
 library(ggplot2)
 library(ggrepel)
 
-# ============================================================
-# 1. 设置路径
-# ============================================================
-
 work_dir <- ""
 setwd(work_dir)
 
@@ -14,29 +10,21 @@ plot_df <- fread(
   file.path(work_dir, "05_plot_data_eGenes_vs_significant_signals.csv")
 )
 
-# ============================================================
-# 2. 提取 time point 和标签
-# ============================================================
-
 plot_df[, time := fifelse(str_detect(cell_type, "_0h$"),  "0h",
                           fifelse(str_detect(cell_type, "_16h$"), "16h",
                                   fifelse(str_detect(cell_type, "_40h$"), "40h",
                                           fifelse(str_detect(cell_type, "_5d$"),  "5d",
                                                   fifelse(str_detect(cell_type, "_LA$"),  "LA", "Other")))))]
 
-# 去掉时间后缀，作为图中文字标签
+
 plot_df[, label := cell_type]
 
 plot_df[, label := str_replace(label, "_(0h|16h|40h|5d|LA)$", "")]
 plot_df[, label := str_replace(label, "_stim$", "")]
 plot_df[, label := str_replace(label, "_uns$", "")]
 
-# 为了让图例顺序更好看
-plot_df[, time := factor(time, levels = c("0h", "16h", "40h", "5d", "LA", "Other"))]
 
-# ============================================================
-# 3. Spearman 相关
-# ============================================================
+plot_df[, time := factor(time, levels = c("0h", "16h", "40h", "5d", "LA", "Other"))]
 
 spearman_res <- cor.test(
   plot_df$N_eGenes,
@@ -57,10 +45,6 @@ fwrite(
 )
 
 print(spearman_summary)
-
-# ============================================================
-# 4. 画 Figure 4B 风格散点图
-# ============================================================
 
 p <- ggplot(
   plot_df,
@@ -112,10 +96,6 @@ p <- ggplot(
   )
 
 print(p)
-
-# ============================================================
-# 5. 保存图片
-# ============================================================
 
 ggsave(
   filename = file.path(work_dir, "Figure4B_style_scatterplot.pdf"),
